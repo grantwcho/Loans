@@ -1,0 +1,202 @@
+---
+title: "Mini-Project"
+author: "Grant Cho"
+date: "11/15/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Appendix
+
+```{r cars}
+data <- read.csv("LoanStats_07_11_Clean.csv") #saving the data into variable `data`
+```
+
+```{r}
+set.seed(1)
+data2 <- data[sample(nrow(data),1000),] #the data's too big, so I sampled it down to 1000 rows for EDA's sake
+```
+
+##Quick EDA
+
+```{r}
+str(data) #loan_status is already labeled a factor with 2 levels
+sum(is.na(data)) #thankfully, no NA values in the data
+summary(data$loan_status) #how many people defaulted on their loans
+sum(data$loan_status == "Charged Off")/length(data$loan_status) #percentage of debtors who defaulted on their loans.
+```
+
+##Why is Lending Club so successful?
+
+```{r}
+ggplot(data, aes(x = grade, y = loan_amnt)) + geom_boxplot() + ggtitle("Loan Amount vs. Grade") + xlab("Grade") +
+  ylab("Loan Amount") + theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(data, aes(x = sub_grade, y = total_rec_prncp)) + geom_boxplot() + ggtitle("Total Principle Received vs. Grade") + xlab("Grade") +
+  ylab("Total Principle Received") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+ggplot(data, aes(x = grade)) + geom_histogram(stat = "count", fill = "darkgreen") + ggtitle("Number of loans per grade from 2007-2011") + xlab("Grade") + ylab("Count") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+summary(data$issue_d)
+data$issue_d2 <- stri_sub(data$issue_d,-4,-1)
+ggplot(data, aes(x = issue_d2, fill = grade)) + geom_histogram(stat = "count") + ggtitle("Number of loans made on Lending Club's website from 2007 to 2011") + xlab("Year which loans were funded") +
+  ylab("Count") + theme(plot.title = element_text(hjust = 0.5))
+
+ggplot(data, aes(x = issue_d2, y = int_rate)) + geom_boxplot() + ggtitle("Interest rate range over time") + xlab("Year") +
+  ylab("Interest Rate") + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+sum(ifelse(data$issue_d2 == "2011", 1, 0))/sum(ifelse(data$issue_d2 == "2007", 1, 0)) #how many times greater is the number of loans made in 2011 compared to those made in 2007
+```
+
+```{r}
+ggplot(data, aes(x = loan_amnt, fill = grade)) + geom_histogram(bins = 30) + ggtitle("Number of loans vs. Loan Amount") + xlab("Loan Amount") +
+  ylab("Count") + theme(plot.title = element_text(hjust = 0.5)) + labs(fill = "Grade") #shows the proportion of loan amounts with different loan grades
+
+ggplot(data, aes(x = grade, fill = loan_status)) + geom_histogram(bins = 30, stat = "count") + ggtitle("Status of loans per Grade") + xlab("Grade") +
+  ylab("Count") + theme(plot.title = element_text(hjust = 0.5)) + labs(fill = "Loan Status") #shows the proportion of graded loans that have either been fully paid or charged off
+```
+
+```{r}
+data2 %>%
+  select_if(is.numeric) %>%
+  dplyr::select(loan_amnt, funded_amnt, funded_amnt_inv, total_pymnt, total_pymnt_inv, total_rec_prncp, total_rec_int, total_rec_late_fee) %>%
+  ggpairs() + theme(text = element_text(size = 5)) #select seemingly redundant variables and plot for collinearity
+```
+
+From the above, we see severely and highly correlated predictor variables, which we would want to remove from the model to avoid redundancies. Funded amount is highly correlated with loan amount. Funded amount invested is also highly correlated with laon amount, total payment, and funded amount, implying a high level of collinearity in the model.
+
+Because of these collinearities, it would be sensible to use LASSO to penalize these coefficients.
+
+##LASSO
+
+```{r}
+data_sub <- data %>%
+  dplyr::select(-c(emp_title, issue_d, zip_code, addr_state, earliest_cr_line, last_pymnt_d, last_credit_pull_d, total_rec_prncp, recoveries, grade, total_pymnt,collection_recovery_fee,total_pymnt_inv,last_pymnt_amnt,annual_inc,issue_d2, funded_amnt, funded_amnt_inv, total_rec_int, total_rec_late_fee, collection_recovery_fee, last_pymnt_amnt)) #deselect any unique identifiers or redundant predictor variables
+```
+
+Removed these variables because they're either unique identifiers, the algorithms don't converge, or they're redundant/collinear variables (e.g. grade and sub_grade).
+
+```{r}
+X <- model.matrix(loan_status~., data_sub)[,-1]
+Y <- data$loan_status
+```
+
+```{r}
+set.seed(471) #set seed for replicability
+fit.cv <- cv.glmnet(X, Y, alpha = 1, family = "binomial", nfolds = 10, type.measure = "auc")
+plot(fit.cv) #finding the lambda value that yields the highest AUC
+```
+
+```{r}
+coef.min <- coef(fit.cv, s = "lambda.1se")
+coef.min <- coef.min[which(coef.min != 0),]
+as.matrix(coef.min)
+beta.min <- rownames(as.matrix(coef.min))
+beta.min #shows us the non-zero coefficients after LASSO has been applied
+```
+
+I do 1se because it's within the bounds of cvsd.
+
+##Logistic Regression
+
+```{r}
+fit.logit.final <- glm(loan_status~term+int_rate+installment+sub_grade+emp_length+home_ownership+purpose+dti+inq_last_6mths+pub_rec+revol_util+total_acc+pub_rec_bankruptcies, data, family = binomial) #logistic regression on non-zero coefficients
+Anova(fit.logit.final)
+```
+
+```{r}
+fit.logit.final1 <- update(fit.logit.final, .~.-pub_rec_bankruptcies) #backward selection to get all significant variables
+Anova(fit.logit.final1)
+summary(fit.logit.final1)
+```
+
+Backward selection to remove the non-significant variables.
+
+```{r}
+fit.logit.roc <- roc(response = data$loan_status, predictor = fit.logit.final1$fitted, plot = T, col = "blue")
+fit.logit.roc$auc 
+```
+
+Backward selection obviously results in a lower AUC.
+
+```{r}
+fit.logit.pred <- ifelse(fit.logit.final1$fitted > 2/3, "1", "0") #2/3 = (2/1)/(1+2/1)
+cm <- table(fit.logit.pred, data$loan_status)
+cm
+```
+
+```{r}
+round((cm[1,2]+2*cm[2,1])/sum(cm), 3) #misclassification error
+data$emp_length
+```
+
+
+```{r}
+data2 %>% #using data2 to expedite the process
+  select_if(is.numeric) %>%
+  dplyr::select(c(int_rate, installment, dti, inq_last_6mths, pub_rec, revol_util, total_acc)) %>%
+  ggpairs() + theme(text = element_text(size = 5)) #select numeric variables from the LASSO final model and plot for collinearity
+```
+
+
+#Random Forest
+
+```{r}
+set.seed(471)
+fit.rf <- randomForest(loan_status~., data_sub, mtry = 5, ntree = 500, localImp = TRUE)
+plot(fit.rf)
+legend("topright", colnames(fit.rf$err.rate), col=1:3, cex = 0.8, fill = 1:3)
+```
+
+```{r}
+n <- nrow(data_sub) 
+n1 <- (2/3)*n 
+train.index <- sample(n, n1, replace=FALSE) 
+length(train.index) 
+data.train <- data_sub[train.index, ] 
+data.test <- data_sub[-train.index, ]
+```
+
+```{r}
+fit.rf.train <- randomForest(loan_status~., data.train) 
+plot(fit.rf.train) 
+legend("topright", colnames(fit.rf.train$err.rate), col = 1:3, cex=0.8, fill=1:3)
+```
+
+```{r}
+predict.rf.y <- predict(fit.rf.train, newdata=data.test) # labels 
+predict.rf <- predict(fit.rf.train, newdata=data.test, type="prob") # Testing errors 
+cm <- table(predict.rf.y, data.test$loan_status)
+round((cm[1,2]+2*cm[2,1])/sum(cm), 3) # MCE = .287, which is slightly worse than the one LASSO achieved
+
+roc(data.test$loan_status, predict.rf[,2], plot=TRUE)
+fit.rf.roc <- roc(data.test$loan_status, predict.rf[,2])
+
+varImpPlot(fit.rf)
+```
+
+##ROC Comparison
+
+```{r}
+plot(1-fit.rf.roc$specificities,
+     fit.rf.roc$sensitivities, col = "red", lwd = 3, type = "l",
+     xlab = "False Positive",
+     ylab = "Sensitivity")
+lines(1-fit.logit.roc$specificities, fit.logit.roc$sensitivities, col = "green", lwd = 3)
+legend("bottomright",
+       c(paste0("fit.rf AUC=", round(fit.rf.roc$auc, 2)),
+         paste0("fit.logit AUC=", round(fit.logit.roc$auc, 2))),
+       col = c("red", "green"),
+       lty = 1)
+```
+
